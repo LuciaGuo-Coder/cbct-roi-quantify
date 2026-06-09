@@ -8,6 +8,7 @@
 
 ```
 ├── main.py             # FastAPI 服务入口（含 Web 交互页面）
+├── ring_roi_core.py    # 任务一算法占位文件，后续替换为正式实现
 ├── requirements.txt    # Python 依赖
 ├── Dockerfile          # 容器化部署
 └── README.md           # 本文档
@@ -51,7 +52,7 @@ curl http://localhost:8000/health
 
 ### 2. `POST /quantify` — ROI 量化分析
 
-接收 Base64 编码的 mask 图和 CT 图，对 mask 进行椭圆核膨胀，计算 ROI 内平均 CT 值，返回带红圈 ROI 标注的可视化图片。
+接收 Base64 编码的 mask 图和 CT 图，调用 `ring_roi_core.get_ring_roi()` 计算环形 ROI 内平均 CT 值，返回带红圈 ROI 标注的可视化图片。
 
 #### 请求体 (JSON)
 
@@ -59,7 +60,7 @@ curl http://localhost:8000/health
 |------|------|------|------|
 | `mask_b64` | string | 是 | Base64 编码的 mask 图（DCTA-DilUnet 输出的分割结果，前景 > 0） |
 | `ct_b64` | string | 是 | Base64 编码的 CT 图（灰度，308×308） |
-| `expand_pixels` | int | 否 | mask 膨胀像素数，默认 0（不膨胀），≥ 0 |
+| `expand_pixels` | int | 否 | mask 膨胀像素数，默认 15，范围 1-50 |
 
 #### 响应体
 
@@ -122,10 +123,10 @@ curl -X POST http://localhost:8000/quantify \
                                │
                                ▼
                  ┌──────────────────────────┐
-                 │ 1. 二值化 mask (>0=前景)  │
-                 │ 2. 椭圆核膨胀 N 像素      │
-                 │ 3. 计算 ROI 平均 CT 值    │
-                 │ 4. 轮廓提取 + 红圈绘制    │
+                 │ 1. Base64 解码与参数校验  │
+                 │ 2. 调用 get_ring_roi      │
+                 │ 3. 生成红圈 ROI 可视化图  │
+                 │ 4. 返回平均 CT 值和图片   │
                  └──────────────────────────┘
                                │
                                ▼
