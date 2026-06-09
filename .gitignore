@@ -1,0 +1,9 @@
+# Ignore everything
+*
+
+# Only track deliverables
+!.gitignore
+!main.py
+!requirements.txt
+!Dockerfile
+!README.md
