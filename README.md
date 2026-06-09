@@ -29,7 +29,7 @@ docker build -t cbct-quantify .
 docker run -p 8000:8000 cbct-quantify
 ```
 
-启动后访问 http://localhost:8000/docs 查看交互式 Swagger API 文档。
+启动后访问 http://localhost:8000 打开可视化操作页面（Swagger API 文档可通过 http://localhost:8000/docs 访问）。
 
 ---
 

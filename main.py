@@ -241,11 +241,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica N
 .btn-primary.loading .spinner{display:inline-block}
 .btn-primary.loading .btn-text{display:none}
 @keyframes spin{to{transform:rotate(360deg)}}
-.error-table{width:100%;border-collapse:collapse;font-size:13px}
-.error-table th{text-align:left;padding:10px 12px;background:#f8fafc;border-bottom:2px solid var(--border);color:var(--text-sec);text-transform:uppercase;font-size:11px;letter-spacing:.5px}
-.error-table td{padding:10px 12px;border-bottom:1px solid var(--border)}
-.error-table tr:last-child td{border-bottom:none}
-.code-tag{background:rgba(79,70,229,.08);color:var(--primary);padding:2px 8px;border-radius:4px;font-family:monospace;font-size:12px;font-weight:600}
 .footer{text-align:center;padding:24px;color:var(--text-sec);font-size:13px}
 </style>
 </head>
@@ -319,19 +314,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica N
     <img class="result-img" id="roiImg">
   </div>
 
-  <!-- Error Table -->
-  <div class="card">
-    <div class="card-title"><span class="icon icon-purple">&#128218;</span> 错误码说明</div>
-    <table class="error-table">
-      <thead><tr><th>错误码</th><th>含义</th><th>触发场景</th></tr></thead>
-      <tbody>
-        <tr><td><span class="code-tag">4001</span></td><td>图片无效</td><td>无法解码为图像，或 mask/CT 尺寸不一致</td></tr>
-        <tr><td><span class="code-tag">4002</span></td><td>掩膜为空</td><td>mask 全为背景（无前景像素）</td></tr>
-        <tr><td><span class="code-tag">4003</span></td><td>膨胀超界</td><td>膨胀后 ROI 覆盖全图</td></tr>
-        <tr><td><span class="code-tag">4004</span></td><td>解码失败</td><td>Base64 编码格式错误</td></tr>
-      </tbody>
-    </table>
-  </div>
 
 </div>
 
