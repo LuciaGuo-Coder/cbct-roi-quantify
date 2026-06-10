@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import base64
+import tempfile
 from enum import IntEnum
 from pathlib import Path
 from typing import Optional
@@ -16,8 +17,12 @@ from typing import Optional
 import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
+
+from ring_roi_core import get_ring_roi
 
 _PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -35,6 +40,8 @@ class ErrCode(IntEnum):
     EMPTY_MASK = 4002
     EXPAND_OUT_OF_BOUNDS = 4003
     DECODE_FAILED = 4004
+    INVALID_PARAM = 4005
+    ALGORITHM_FAILED = 5001
 
 
 _ERR_MSG = {
@@ -42,6 +49,8 @@ _ERR_MSG = {
     ErrCode.EMPTY_MASK: "掩膜全为背景，不包含任何前景区域",
     ErrCode.EXPAND_OUT_OF_BOUNDS: "膨胀后 ROI 超出图像边界或覆盖全图",
     ErrCode.DECODE_FAILED: "Base64 解码失败，请确认编码是否正确",
+    ErrCode.INVALID_PARAM: "请求参数无效",
+    ErrCode.ALGORITHM_FAILED: "ROI 算法执行失败",
 }
 
 
@@ -57,7 +66,7 @@ def _raise(code: ErrCode, detail: Optional[str] = None) -> None:
 class QuantifyRequest(BaseModel):
     mask_b64: str = Field(..., description="Base64 编码的 mask 图（灰度/二值，前景像素值 > 0）")
     ct_b64: str = Field(..., description="Base64 编码的 CT 图（灰度）")
-    expand_pixels: int = Field(default=0, ge=0, description="mask 膨胀像素数（椭圆核，≥0）")
+    expand_pixels: int = Field(default=15, ge=1, le=50, description="mask 膨胀像素数（1-50）")
 
 
 class QuantifyResponse(BaseModel):
@@ -68,9 +77,15 @@ class QuantifyResponse(BaseModel):
 
 # ── Image encode / decode helpers ────────────────────────────────────────────
 
-def _b64_to_image(b64_str: str, label: str) -> np.ndarray:
+def _strip_data_url_prefix(b64_str: str) -> str:
+    if b64_str.startswith("data:") and "," in b64_str:
+        return b64_str.split(",", 1)[1]
+    return b64_str
+
+
+def _b64_to_image_bytes(b64_str: str, label: str) -> bytes:
     try:
-        raw = base64.b64decode(b64_str)
+        raw = base64.b64decode(_strip_data_url_prefix(b64_str), validate=True)
     except Exception:
         _raise(ErrCode.DECODE_FAILED, f"{label} Base64 解码失败")
 
@@ -78,7 +93,7 @@ def _b64_to_image(b64_str: str, label: str) -> np.ndarray:
     img = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
     if img is None:
         _raise(ErrCode.INVALID_IMAGE, f"{label} 无法解码为有效图像")
-    return img
+    return raw
 
 
 def _image_to_b64(img: np.ndarray, fmt: str = ".png") -> str:
@@ -94,59 +109,39 @@ def _ensure_gray(img: np.ndarray) -> np.ndarray:
     return img
 
 
-# ── Core quantify logic ─────────────────────────────────────────────────────
+def _draw_roi_overlay(ct_path: Path, ring_mask: np.ndarray) -> np.ndarray:
+    ct = cv2.imread(str(ct_path), cv2.IMREAD_UNCHANGED)
+    if ct is None:
+        _raise(ErrCode.INVALID_IMAGE, "CT 图像无法读取")
 
-def quantify_roi(
-    mask: np.ndarray,
-    ct: np.ndarray,
-    expand_pixels: int,
-) -> tuple[float, np.ndarray, int]:
-    """
-    对 mask 进行膨胀，计算 ROI 区域在 CT 图上的平均值，
-    并在 CT 图上绘制红色轮廓标注 ROI。
-
-    Returns: (mean_ct_value, visualization_bgr, roi_pixel_count)
-    """
-    mask_gray = _ensure_gray(mask)
     ct_gray = _ensure_gray(ct)
-
-    if mask_gray.shape != ct_gray.shape:
+    roi_mask = (ring_mask > 0).astype(np.uint8) * 255
+    if roi_mask.shape != ct_gray.shape:
         _raise(
             ErrCode.INVALID_IMAGE,
-            f"mask 尺寸 {mask_gray.shape} 与 CT 尺寸 {ct_gray.shape} 不一致",
+            f"ring ROI 尺寸 {roi_mask.shape} 与 CT 尺寸 {ct_gray.shape} 不一致",
         )
 
-    # 二值化（与项目中 dataset.py 的标签处理一致，前景 > 0）
-    binary = (mask_gray > 0).astype(np.uint8) * 255
-
-    if cv2.countNonZero(binary) == 0:
-        _raise(ErrCode.EMPTY_MASK)
-
-    # 椭圆核膨胀
-    if expand_pixels > 0:
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE,
-            (2 * expand_pixels + 1, 2 * expand_pixels + 1),
-        )
-        binary = cv2.dilate(binary, kernel, iterations=1)
-
-    roi_count = cv2.countNonZero(binary)
-    total_pixels = binary.shape[0] * binary.shape[1]
-
-    if roi_count == 0:
-        _raise(ErrCode.EMPTY_MASK, "膨胀后 mask 仍为空")
-    if roi_count >= total_pixels:
-        _raise(ErrCode.EXPAND_OUT_OF_BOUNDS)
-
-    # 计算 ROI 平均 CT 值
-    mean_val = float(cv2.mean(ct_gray, mask=binary)[0])
-
-    # 提取轮廓并绘制红色标注
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     vis = cv2.cvtColor(ct_gray, cv2.COLOR_GRAY2BGR)
     cv2.drawContours(vis, contours, -1, (0, 0, 255), 2)
+    return vis
 
-    return mean_val, vis, roi_count
+
+def _raise_algorithm_error(exc: Exception) -> None:
+    code = getattr(exc, "code", None)
+    message = str(exc) or None
+
+    if code == "INVALID_IMAGE":
+        _raise(ErrCode.INVALID_IMAGE, message)
+    if code == "EMPTY_MASK":
+        _raise(ErrCode.EMPTY_MASK, message)
+    if code == "EXPAND_OUT_OF_BOUNDS":
+        _raise(ErrCode.EXPAND_OUT_OF_BOUNDS, message)
+    if code == "INVALID_PARAM":
+        _raise(ErrCode.INVALID_PARAM, message)
+
+    _raise(ErrCode.ALGORITHM_FAILED, message)
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -154,16 +149,27 @@ def quantify_roi(
 @app.post("/quantify", response_model=QuantifyResponse, summary="ROI 量化分析")
 async def quantify(req: QuantifyRequest):
     """
-    接收 Base64 编码的 mask 图与 CT 图，对 mask 进行膨胀，
-    计算 ROI 区域平均 CT 值，并返回标注红圈 ROI 的可视化图片。
-
-    mask 来源：DCTA-DilUnet 分割网络的输出（20 类标签，像素值 0-19），
-    前景（像素值 > 0）即为牙齿 ROI。
+    接收 Base64 编码的 mask 图与 CT 图，调用任务一的 get_ring_roi 算法，
+    计算环形 ROI 区域平均 CT 值，并返回标注红圈 ROI 的可视化图片。
     """
-    mask_img = _b64_to_image(req.mask_b64, "mask")
-    ct_img = _b64_to_image(req.ct_b64, "ct")
+    mask_bytes = _b64_to_image_bytes(req.mask_b64, "mask")
+    ct_bytes = _b64_to_image_bytes(req.ct_b64, "ct")
 
-    mean_val, vis, count = quantify_roi(mask_img, ct_img, req.expand_pixels)
+    with tempfile.TemporaryDirectory(prefix="cbct_roi_") as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        mask_path = tmp_path / "mask.png"
+        ct_path = tmp_path / "ct.png"
+        mask_path.write_bytes(mask_bytes)
+        ct_path.write_bytes(ct_bytes)
+
+        try:
+            mean_val, ring_mask = get_ring_roi(mask_path, ct_path, req.expand_pixels)
+        except Exception as exc:
+            _raise_algorithm_error(exc)
+
+        roi_mask = (ring_mask > 0).astype(np.uint8) * 255
+        count = int(cv2.countNonZero(roi_mask))
+        vis = _draw_roi_overlay(ct_path, roi_mask)
 
     return QuantifyResponse(
         mean_ct_value=round(mean_val, 4),
@@ -288,7 +294,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica N
     </div>
     <div class="form-group" style="margin-top:20px">
       <label>膨胀像素 (expand_pixels)</label>
-      <input type="number" id="expandInput" value="5" min="0" max="100">
+      <input type="number" id="expandInput" value="15" min="1" max="50">
     </div>
     <button class="btn btn-primary" id="runBtn" onclick="runQuantify()" disabled>
       <span class="spinner"></span>
@@ -390,7 +396,7 @@ async function runQuantify(){
       body:JSON.stringify({
         mask_b64:maskB64,
         ct_b64:ctB64,
-        expand_pixels:parseInt(document.getElementById('expandInput').value)||0
+        expand_pixels:parseInt(document.getElementById('expandInput').value)||15
       })
     });
     const d=await r.json();
@@ -429,4 +435,19 @@ async def custom_http_exception_handler(request, exc):
     return JSONResponse(
         status_code=exc.status_code,
         content={"success": False, "error": exc.detail},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=422,
+        content=jsonable_encoder({
+            "success": False,
+            "error": {
+                "code": int(ErrCode.INVALID_PARAM),
+                "message": "请求参数无效",
+                "detail": exc.errors(),
+            },
+        }),
     )

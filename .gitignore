@@ -4,6 +4,7 @@
 # Only track deliverables
 !.gitignore
 !main.py
+!ring_roi_core.py
 !requirements.txt
 !Dockerfile
 !README.md
